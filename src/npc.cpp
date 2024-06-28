@@ -25,6 +25,7 @@ void load(bool reload /*= false*/)
 		return;
 	}
 
+	scriptInterface->loadFile("data/global.lua");
 	if (!scriptInterface->loadNpcLib("data/npc/lib/npc.lua")) {
 		std::cout << "[Warning - NpcLib::NpcLib] Can not load lib: data/npc/lib/npc.lua" << std::endl;
 		std::cout << scriptInterface->getLastLuaError() << std::endl;
@@ -46,17 +47,19 @@ void reload()
 
 	const std::map<uint32_t, Npc*>& npcs = g_game.getNpcs();
 	for (const auto& it : npcs) {
-		it.second->closeAllShopWindows();
+		if (it.second) {
+			it.second->closeAllShopWindows();
+		}
 	}
 
 	for (const auto& it : getNpcTypes()) {
-		if (!it.second->fromLua) {
+		if (it.second && !it.second->fromLua) {
 			it.second->loadFromXml();
 		}
 	}
 
 	for (const auto& it : npcs) {
-		if (!it.second->npcType->fromLua) {
+		if (it.second && !it.second->npcType->fromLua) {
 			it.second->reload();
 		}
 	}
@@ -76,7 +79,101 @@ NpcType* getNpcType(std::string name)
 }
 
 NpcScriptInterface* getScriptInterface() { return scriptInterface.get(); }
+
+bool loadNpcs(bool reload)
+{
+	namespace fs = std::filesystem;
+
+	const auto dir = fs::current_path() / "data/npc/lua";
+	if (!fs::exists(dir) || !fs::is_directory(dir)) {
+		std::cout << "[Warning - Npcs::loadNpcs] Can not load folder 'npc/lua'" << std::endl;
+		return false;
+	}
+
+	fs::recursive_directory_iterator endit;
+	std::vector<fs::path> v;
+	std::string disable = ("#");
+	for (fs::recursive_directory_iterator it(dir); it != endit; ++it) {
+		auto fn = it->path().parent_path().filename();
+		if (fs::is_regular_file(*it) && it->path().extension() == ".lua") {
+			size_t found = it->path().filename().string().find(disable);
+			if (found != std::string::npos) {
+				if (getBoolean(ConfigManager::SCRIPTS_CONSOLE_LOGS)) {
+					std::cout << "> " << it->path().filename().string() << " [disabled]" << std::endl;
+				}
+				continue;
+			}
+			v.push_back(it->path());
+		}
+	}
+	sort(v.begin(), v.end());
+	std::string redir;
+	for (auto it = v.begin(); it != v.end(); ++it) {
+		const std::string scriptFile = it->string();
+		if (redir.empty() || redir != it->parent_path().string()) {
+			auto p = fs::path(it->relative_path());
+			if (getBoolean(ConfigManager::SCRIPTS_CONSOLE_LOGS)) {
+				std::cout << ">> [" << p.parent_path().filename() << "]" << std::endl;
+			}
+			redir = it->parent_path().string();
+		}
+
+		if (scriptInterface->loadFile(scriptFile) == -1) {
+			std::cout << "> " << it->filename().string() << " [error]" << std::endl;
+			std::cout << "^ " << scriptInterface->getLastLuaError() << std::endl;
+			continue;
+		}
+
+		if (getBoolean(ConfigManager::SCRIPTS_CONSOLE_LOGS)) {
+			if (!reload) {
+				std::cout << "> " << it->filename().string() << " [loaded]" << std::endl;
+			} else {
+				std::cout << "> " << it->filename().string() << " [reloaded]" << std::endl;
+			}
+		}
+	}
+
+	return true;
+}
 } // namespace Npcs
+
+int32_t NpcScriptInterface::loadFile(const std::string& file, Npc* npc /* = nullptr*/)
+{
+	// loads file as a chunk at stack top
+	int ret = luaL_loadfile(L, file.data());
+	if (ret != 0) {
+		lastLuaError = tfs::lua::popString(L);
+		return -1;
+	}
+
+	// check that it is loaded as a function
+	if (!lua_isfunction(L, -1)) {
+		lua_pop(L, 1);
+		return -1;
+	}
+
+	loadingFile = file;
+
+	if (!tfs::lua::reserveScriptEnv()) {
+		lua_pop(L, 1);
+		return -1;
+	}
+
+	ScriptEnvironment* env = tfs::lua::getScriptEnv();
+	env->setScriptId(Npcs::EVENT_ID_LOADING, this);
+	env->setNpc(npc);
+
+	// execute it
+	ret = tfs::lua::protectedCall(L, 0, 0);
+	if (ret != 0) {
+		reportErrorFunc(nullptr, tfs::lua::popString(L));
+		tfs::lua::resetScriptEnv();
+		return -1;
+	}
+
+	tfs::lua::resetScriptEnv();
+	return 0;
+}
 
 Npc* Npc::createNpc(const std::string& name)
 {
@@ -309,6 +406,8 @@ void Npc::loadNpcTypeInfo()
 	parameters = npcType->parameters;
 	health = npcType->health;
 	healthMax = npcType->healthMax;
+	sightX = npcType->sightX;
+	sightY = npcType->sightY;
 }
 
 void Npc::onCreatureAppear(Creature* creature, bool isLogin)
@@ -352,6 +451,10 @@ bool NpcType::loadCallback(NpcScriptInterface* scriptInterface)
 		npcEventHandler->playerEndTradeEvent = id;
 	} else if (eventType == "think") {
 		npcEventHandler->thinkEvent = id;
+	} else if (eventType == "sight") {
+		npcEventHandler->creatureSightEvent = id;
+	} else if (eventType == "speechbubble") {
+		npcEventHandler->speechBubbleEvent = id;
 	}
 	return true;
 }
@@ -390,12 +493,8 @@ void Npc::onCreatureSay(Creature* creature, SpeakClasses type, const std::string
 		return;
 	}
 
-	// only players for script events
-	Player* player = creature->getPlayer();
-	if (player) {
-		if (npcEventHandler) {
-			npcEventHandler->onCreatureSay(player, type, text);
-		}
+	if (npcEventHandler) {
+		npcEventHandler->onCreatureSay(creature, type, text);
 	}
 }
 
@@ -414,6 +513,27 @@ void Npc::onThink(uint32_t interval)
 	for (const auto& player : players) {
 		assert(dynamic_cast<Player*>(player) != nullptr);
 		spectators.insert(static_cast<Player*>(player));
+	}
+
+	if (sightX > 0 || sightY > 0) {
+		SpectatorVec tempCreatures;
+		g_game.map.getSpectators(tempCreatures, getPosition(), false, false, Npcs::ViewportX, Npcs::ViewportX,
+		                         Npcs::ViewportY, Npcs::ViewportY);
+		std::erase_if(spectatorCache, [&](auto const& it) {
+			return std::find(tempCreatures.begin(), tempCreatures.end(), it) == tempCreatures.end();
+		});
+		SpectatorVec sightCreatures;
+		g_game.map.getSpectators(sightCreatures, getPosition(), false, false, sightX, sightX, sightY, sightY);
+		for (const auto& creature : sightCreatures) {
+			if (!spectatorCache.contains(creature)) {
+				if (npcEventHandler) {
+					if (this != creature) {
+						npcEventHandler->onCreatureSight(creature);
+					}
+				}
+				spectatorCache.insert(creature);
+			}
+		}
 	}
 
 	setIdle(spectators.empty());
@@ -435,7 +555,10 @@ void Npc::onThink(uint32_t interval)
 	spectators.clear();
 }
 
-void Npc::doSay(const std::string& text) { g_game.internalCreatureSay(this, TALKTYPE_SAY, text, false); }
+void Npc::doSay(const std::string& text, SpeakClasses talkType)
+{
+	g_game.internalCreatureSay(this, talkType, text, false);
+}
 
 void Npc::doSayToPlayer(Player* player, const std::string& text)
 {
@@ -685,7 +808,7 @@ void NpcScriptInterface::registerFunctions()
 
 int NpcScriptInterface::luaActionSay(lua_State* L)
 {
-	// selfSay(words[, target])
+	// selfSay(words[, target[, talkType = TALKTYPE_SAY])
 	Npc* npc = tfs::lua::getScriptEnv()->getNpc();
 	if (!npc) {
 		return 0;
@@ -700,7 +823,8 @@ int NpcScriptInterface::luaActionSay(lua_State* L)
 		}
 	}
 
-	npc->doSay(text);
+	SpeakClasses talkType = tfs::lua::getNumber<SpeakClasses>(L, 3, TALKTYPE_SAY);
+	npc->doSay(text, talkType);
 	return 0;
 }
 
@@ -1176,9 +1300,10 @@ NpcEventsHandler::NpcEventsHandler() : scriptInterface(Npcs::scriptInterface) {}
 
 NpcEventsHandler::~NpcEventsHandler()
 {
-	for (auto eventId : {creatureSayEvent, creatureDisappearEvent, creatureAppearEvent, creatureMoveEvent,
-	                     playerCloseChannelEvent, playerEndTradeEvent, thinkEvent}) {
-		if (!npc->npcType->fromLua) {
+	for (auto eventId :
+	     {creatureSayEvent, creatureDisappearEvent, creatureAppearEvent, creatureMoveEvent, playerCloseChannelEvent,
+	      playerEndTradeEvent, thinkEvent, speechBubbleEvent, creatureSightEvent}) {
+		if (npc && !npc->npcType->fromLua) {
 			scriptInterface->removeEvent(eventId);
 		}
 	}
@@ -1375,4 +1500,58 @@ void NpcEventsHandler::onThink()
 
 	scriptInterface->pushFunction(thinkEvent);
 	scriptInterface->callFunction(0);
+}
+
+void NpcEventsHandler::onCreatureSight(Creature* creature)
+{
+	if (creatureSightEvent == -1) {
+		return;
+	}
+
+	// onCreatureSight(creature)
+	if (!tfs::lua::reserveScriptEnv()) {
+		std::cout << "[Error - NpcScript::onCreatureSight] Call stack overflow" << std::endl;
+		return;
+	}
+
+	ScriptEnvironment* env = tfs::lua::getScriptEnv();
+	env->setScriptId(creatureSightEvent, scriptInterface.get());
+	env->setNpc(npc);
+
+	lua_State* L = scriptInterface->getLuaState();
+	scriptInterface->pushFunction(creatureSightEvent);
+	tfs::lua::pushUserdata(L, creature);
+	tfs::lua::setCreatureMetatable(L, -1, creature);
+	scriptInterface->callFunction(1);
+}
+
+void NpcEventsHandler::onSpeechBubble(Player* player, uint8_t& speechBubble)
+{
+	if (speechBubbleEvent == -1) {
+		return;
+	}
+
+	// onSpeechBubble(player, speechBubble)
+	if (!tfs::lua::reserveScriptEnv()) {
+		std::cout << "[Error - NpcScript::onSpeechBubble] Call stack overflow" << std::endl;
+		return;
+	}
+
+	ScriptEnvironment* env = tfs::lua::getScriptEnv();
+	env->setScriptId(speechBubbleEvent, scriptInterface.get());
+	env->setNpc(npc);
+
+	lua_State* L = scriptInterface->getLuaState();
+	scriptInterface->pushFunction(speechBubbleEvent);
+	tfs::lua::pushUserdata(L, player);
+	tfs::lua::setMetatable(L, -1, "Player");
+	lua_pushnumber(L, speechBubble);
+
+	if (tfs::lua::protectedCall(L, 2, 1) != 0) {
+		reportErrorFunc(L, tfs::lua::popString(L));
+	} else {
+		speechBubble = tfs::lua::getNumber<uint8_t>(L, -1);
+		lua_pop(L, 1);
+	}
+	tfs::lua::resetScriptEnv();
 }

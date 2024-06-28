@@ -3486,14 +3486,7 @@ void ProtocolGame::AddCreature(NetworkMessage& msg, const Creature* creature, bo
 
 	msg.add<uint16_t>(creature->getStepSpeed() / 2);
 
-	msg.addByte(0x00); // creature debuffs, to do
-	/*
-	if (icon != CREATUREICON_NONE) {
-	        msg.addByte(icon);
-	        msg.addByte(1);
-	        msg.add<uint16_t>(0);
-	}
-	*/
+	AddCreatureIcons(msg, creature);
 
 	msg.addByte(player->getSkullClient(creature));
 	msg.addByte(player->getPartyShield(otherPlayer));
@@ -3513,7 +3506,13 @@ void ProtocolGame::AddCreature(NetworkMessage& msg, const Creature* creature, bo
 		msg.addByte(otherPlayer ? otherPlayer->getVocation()->getClientId() : 0x00);
 	}
 
-	msg.addByte(creature->getSpeechBubble());
+	uint8_t speechBubble = creature->getSpeechBubble();
+	if (auto npc = creature->getNpc()) {
+		if (npc->npcEventHandler->speechBubbleEvent != -1) {
+			npc->npcEventHandler->onSpeechBubble(player, speechBubble);
+		}
+	}
+	msg.addByte(speechBubble);
 	msg.addByte(0xFF); // MARK_UNMARKED
 	msg.addByte(0x00); // inspection type (bool?)
 

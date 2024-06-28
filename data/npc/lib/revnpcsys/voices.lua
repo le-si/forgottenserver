@@ -7,9 +7,15 @@
         - The class provides methods to check if a voice can be used and to get the voice to use.
 
     Functions:
+        - NpcVoices:clear()
         - NpcVoices:canUseVoice(handler)
 ]]
 
+---@class NpcVoices
+---@field lastVoice table<string, any>
+---@field lastVoiceTime number
+---@field clear fun()
+---@field canUseVoice fun(handler: table): boolean, table|nil
 
 if not NpcVoices then
     -- If NpcVoices doesn't exist, it's created as an empty table
@@ -29,38 +35,43 @@ if not NpcVoices then
             return self[npc:getId()]
         end
     })
+end
 
-    -- Checks if a voice can be used.
-    ---@param handler table The NpcsHandler to get the voices from.
-    ---@return boolean, table|nil if the voice can be used, false otherwise.
-    function NpcVoices:canUseVoice(handler)
-        local voices = {}
+-- Clears all NpcVoices data for an NPC.
+function NpcVoices:clear()
+    self = nil
+end
 
-        if self.lastVoiceTime >= os.mtime() then
-            return false
-        end
+-- Checks if a voice can be used.
+---@param handler table The NpcsHandler to get the voices from.
+---@return boolean, table|nil if the voice can be used, false otherwise.
+function NpcVoices:canUseVoice(handler)
+    local voices = {}
 
-        for _,voice in pairs(handler.voices) do
-            if math.random(1, 100) <= voice.chance then
-                table.insert(voices, voice)
-            end
-        end
-
-        self.lastVoiceTime = os.mtime() + handler.voicesDelay
-
-        if #voices == 0 then
-            return false
-        end
-
-        local voice = voices[math.random(1, #voices)]
-        if voice == self.lastVoice and #voices > 1 then
-            -- rolling again until we get another voice, we only do this if there is more than one voice to choose from
-            repeat
-                voice = voices[math.random(1, #voices)]
-            until voice ~= self.lastVoice
-        end
-
-        self.lastVoice = voice
-        return true, voice
+    if self.lastVoiceTime >= os.mtime() then
+        return false
     end
+
+    for _,voice in pairs(handler.voices) do
+        if math.random(1, 100) <= voice.chance then
+            table.insert(voices, voice)
+        end
+    end
+
+    self.lastVoiceTime = os.mtime() + handler.voicesDelay
+
+    if #voices == 0 then
+        return false
+    end
+
+    local voice = voices[math.random(1, #voices)]
+    if voice == self.lastVoice and #voices > 1 then
+        -- rolling again until we get another voice, we only do this if there is more than one voice to choose from
+        repeat
+            voice = voices[math.random(1, #voices)]
+        until voice ~= self.lastVoice
+    end
+
+    self.lastVoice = voice
+    return true, voice
 end

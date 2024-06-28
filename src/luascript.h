@@ -155,6 +155,11 @@ public:
 	static const luaL_Reg luaDatabaseTable[9];
 	static const luaL_Reg luaResultTable[6];
 
+	//
+	std::string lastLuaError;
+	std::string interfaceName;
+	std::string loadingFile;
+
 protected:
 	virtual bool closeState();
 
@@ -873,6 +878,7 @@ private:
 	static int luaNpcTypeParameter(lua_State* L);
 	static int luaNpcTypeHealth(lua_State* L);
 	static int luaNpcTypeMaxHealth(lua_State* L);
+	static int luaNpcTypeSight(lua_State* L);
 
 	// Guild
 	static int luaGuildCreate(lua_State* L);
@@ -1384,11 +1390,6 @@ private:
 	static int luaXmlNodeName(lua_State* L);
 	static int luaXmlNodeFirstChild(lua_State* L);
 	static int luaXmlNodeNextSibling(lua_State* L);
-
-	//
-	std::string lastLuaError;
-	std::string interfaceName;
-	std::string loadingFile;
 };
 
 class LuaEnvironment : public LuaScriptInterface
